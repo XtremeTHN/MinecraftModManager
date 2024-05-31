@@ -1,5 +1,19 @@
+import functools
 import requests
+import shutil
+import os
+
+from threading import Thread
 from typing import Literal, TypedDict, Callable
+
+def worker(func):
+    def wrapper(*args, **kwargs):
+        thread = Thread(target=func, args=args, kwargs=kwargs)
+        thread.start()
+
+        return thread
+    
+    return wrapper
 
 PROJECT_TYPE = Literal[
     "mods", "plugins", "datapacks", 
@@ -22,7 +36,7 @@ class Filters(TypedDict):
     project_type: PROJECT_TYPE
     categories: CATEGORIES_TYPE
 
-class ModrinthProject(TypedDict):
+class ModrinthProjectQueried(TypedDict):
     project_id: str
     project_type: PROJECT_TYPE
     slug: str
@@ -44,8 +58,45 @@ class ModrinthProject(TypedDict):
     featured_gallery: str | None
     color: int
 
+class ModrinthProjectFileHash(TypedDict):
+    sha512: str
+    sha1: str
+
+class ModrinthProjectFile(TypedDict):
+    hashes: ModrinthProjectFileHash
+    url: str
+    filename: str
+    primary: bool
+    size: int
+    file_type: str | None
+
+class ModrinthProjectDependency(TypedDict):
+    version_id: str | None
+    project_id: str
+    file_name: str | None
+    dependency_type: Literal["required", "optional"]
+
+class ModrinthProject(TypedDict):
+    game_versions: list[str]
+    loaders: list[str]
+    id: str
+    project_id: str
+    author_id: str
+    featured: bool
+    name: str
+    version_number: str
+    changelog: str
+    changelog_url: str | None
+    date_published: str
+    downloads: int
+    version_type: str
+    status: str
+    requested_status: str | None
+    files: list[ModrinthProjectFile]
+    dependencies: list
+
 class ModrinthModQuery(TypedDict):
-    hits: list[ModrinthProject]
+    hits: list[ModrinthProjectQueried]
     offset: int
     limit: int
     total_hits: int
@@ -65,13 +116,19 @@ def stringify_list(_list):
     return res + "]"
  
 class ModrinthMods:
+    class UrlFileNotFound(Exception):
+        pass
+
     def __init__(self) -> None:
         ...
     
-    def get(self, route, **kwargs):
+    def get(self, *routes, **kwargs):
         formated_kwargs = [f"{x}={kwargs[x]}" for x in kwargs if kwargs[x] is not None]
-        if type(route) == list:
-            route = "/".join(route)
+        if len(routes) > 1:
+            route = "/".join(routes)
+        else:
+            route = routes[0]
+
         print(f'https://api.modrinth.com/v2/{route}{"?" if len(formated_kwargs) > 0 else ""}{"&".join(formated_kwargs)}')
         return requests.get(f'https://api.modrinth.com/v2/{route}{"?" if len(formated_kwargs) > 0 else ""}{"&".join(formated_kwargs)}')
     
@@ -91,7 +148,7 @@ class ModrinthMods:
             tuple[ModrinthModQuery, func]: Returns the query response and a function to get the next chunk of hits
         """
         
-        def _next() -> tuple[ModrinthModQuery, Callable]:
+        def _next(limit=limit) -> tuple[ModrinthModQuery, Callable]:
             """Gets the next chunk of hits
 
             Returns:
@@ -127,3 +184,40 @@ class ModrinthMods:
         
 
         return (self.get("search", query=query, facets=stringify_list(_formated_filters), index=index, offset=offset, limit=limit).json(), _next)
+    
+    def get_project(self, project: ModrinthProjectQueried, version=None) -> list[ModrinthProject]:
+        if version is not None:
+            version = f'["{version}"]'
+
+        return self.get("project", project["project_id"], "version?", game_versions=version).json()
+
+    @worker
+    def download_mod(self, mod: ModrinthProjectQueried, version: str, path: str, cb: dict[str, Callable[[int], None]]={}):
+        proj_info = self.get_project(mod, version=version)
+        
+        proj_url = {}
+        for x in proj_info:
+            if "files" in x:
+                for file in x["files"]:
+                    proj_url["url"] = file["url"]
+                    proj_url["name"] = file["filename"]
+                    break
+
+        if proj_url == "":
+            raise self.UrlFileNotFound(f"Url file not found on mod {mod.get('title')}")
+             
+        with requests.get(proj_url["url"], stream=True) as r:
+            r.raw.read = functools.partial(r.raw.read, decode_content=True)
+
+            with open(os.path.join(path, proj_url["name"]), "wb") as file:
+
+                length = r.headers.get("content-length")
+                cb["setMax"](length)
+                current = 0
+                while True:
+                    buf = r.raw.read(65536)
+                    if not buf:
+                        break
+                    file.write(buf)
+                    current += len(buf)
+                    cb["update"](current)
