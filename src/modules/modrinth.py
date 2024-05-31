@@ -1,5 +1,5 @@
 import requests
-from typing import Literal, TypedDict, Any
+from typing import Literal, TypedDict, Callable
 
 PROJECT_TYPE = Literal[
     "mods", "plugins", "datapacks", 
@@ -29,9 +29,26 @@ class ModrinthProject(TypedDict):
     author: str
     title: str
     description: str
+    categories: list[CATEGORIES_TYPE]
+    display_categories: list[CATEGORIES_TYPE]
+    versions: list[str]
+    downloads: int
+    follows: int
+    icon_url: str
+    date_created: str
+    date_modified: str
+    latest_version: str
+    client_side: Literal["required", "unsopported", "optional"]
+    server_side: Literal["required", "unsopported", "optional"]
+    gallery: list[str]
+    featured_gallery: str | None
+    color: int
 
 class ModrinthModQuery(TypedDict):
     hits: list[ModrinthProject]
+    offset: int
+    limit: int
+    total_hits: int
 
 def stringify_list(_list):
     res = "["
@@ -46,7 +63,6 @@ def stringify_list(_list):
         res = f'{res}{value}{suffix}'
     
     return res + "]"
-
  
 class ModrinthMods:
     def __init__(self) -> None:
@@ -61,7 +77,7 @@ class ModrinthMods:
     
     def search_mods(self, query=None, filters: Filters={},
                     index: Literal["relevance","downloads","follows","newest","updated"]="relevance", 
-                    offset=0, limit=10):
+                    offset=0, limit=10) -> tuple[ModrinthModQuery, Callable]:
         """Search mods
 
         Args:
@@ -70,7 +86,19 @@ class ModrinthMods:
             index (str, optional): The sorting method. Defaults to "relevance".
             offset (int, optional): The offset into the search. Defaults to 0.
             limit (int, optional): The number of results returned by the search. Defaults to 10. Max value is 100.
+        
+        Returns:
+            tuple[ModrinthModQuery, func]: Returns the query response and a function to get the next chunk of hits
         """
+        
+        def _next() -> tuple[ModrinthModQuery, Callable]:
+            """Gets the next chunk of hits
+
+            Returns:
+                tuple[ModrinthModQuery, _next]: Returns the query response and a function to get the next chunk of hits
+            """
+            return self.search_mods(query=query, filters=filters, index=index, offset=limit, limit=limit)
+            
         if limit > 100:
             raise ValueError("Limit should not be more than 100.")
         
@@ -98,4 +126,4 @@ class ModrinthMods:
             raise NotImplementedError("Choose another filter pls")
         
 
-        return self.get("search", query=query, facets=stringify_list(_formated_filters), index=index, offset=offset, limit=limit).json()
+        return (self.get("search", query=query, facets=stringify_list(_formated_filters), index=index, offset=offset, limit=limit).json(), _next)
